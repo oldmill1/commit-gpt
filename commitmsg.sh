@@ -10,6 +10,8 @@ if ! command -v jq &> /dev/null; then
   exit 1
 fi
 
+echo "🧠 Using model: $MODEL"
+
 # Ask user which Git directory to use
 DEFAULT_DIR="$HOME/dev"
 echo "📁 Default search root: $DEFAULT_DIR"
@@ -37,6 +39,15 @@ echo "📥 Collecting working tree changes..."
 git add -N .  # Include untracked files
 DIFF_CONTENT=$(git diff HEAD)
 
+# Truncate if too long
+MAX_LENGTH=24000  # ~6,000 tokens
+if (( ${#DIFF_CONTENT} > MAX_LENGTH )); then
+  echo "⚠️ Diff is too large (${#DIFF_CONTENT} chars). Truncating to ${MAX_LENGTH}..."
+  DIFF_CONTENT="${DIFF_CONTENT:0:$MAX_LENGTH}"
+fi
+
+echo "📏 Final diff size: ${#DIFF_CONTENT} characters"
+
 # Check for empty diff
 if [ -z "$DIFF_CONTENT" ]; then
   echo "✅ No changes detected. Nothing to describe."
@@ -61,6 +72,21 @@ RESPONSE=$(curl -s https://api.openai.com/v1/chat/completions \
   -H "Authorization: Bearer ${API_KEY:-$OPENAI_API_KEY}" \
   -H "Content-Type: application/json" \
   -d "$REQUEST_JSON")
+
+# 🔍 Show full response from OpenAI
+echo -e "\n🧪 Raw OpenAI response:"
+echo "$RESPONSE" | jq || echo "$RESPONSE"
+
+COMMIT_MSG=$(echo "$RESPONSE" | jq -r '.choices[0].message.content' 2>/dev/null)
+
+if [[ -z "$COMMIT_MSG" || "$COMMIT_MSG" == "null" ]]; then
+  echo "❌ OpenAI failed to generate a commit message."
+  echo "💡 Try checking the following:"
+  echo "   • Is OPENAI_API_KEY set? → echo \$OPENAI_API_KEY"
+  echo "   • Is the diff too large? → echo \${#DIFF_CONTENT}"
+  echo "   • Is the model available? (gpt-4 may be rate-limited)"
+  exit 1
+fi
 
 # Extract commit message
 COMMIT_MSG=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "❌ Failed to get a commit message."')
