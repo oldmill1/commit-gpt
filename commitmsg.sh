@@ -1,64 +1,96 @@
 #!/bin/bash
-# OpenAI API configuration
-API_KEY="${OPENAI_API_KEY}"
-MODEL="gpt-4"
-echo "$API_KEY" | wc -c
 
-# Ensure jq is installed
-if ! command -v jq &> /dev/null; then
-  echo "❌ jq is required but not installed. Install it first."
+# Timestamp logging
+log() {
+  echo "[$(date +'%H:%M:%S')] $1"
+}
+
+log "🚀 Starting AI Commit Message Generator..."
+
+# Load .env file from common locations
+load_env() {
+  local env_file="$1"
+  if [ -f "$env_file" ]; then
+    log "📄 Loading environment from: $env_file"
+    export $(grep -v '^#' "$env_file" | grep -v '^$' | xargs)
+    return 0
+  fi
+  return 1
+}
+
+# Try to load .env from prioritized locations
+ENV_LOADED=false
+load_env ".env" && ENV_LOADED=true
+load_env "../.env" && ENV_LOADED=true
+load_env "$HOME/.env" && ENV_LOADED=true
+if [ "$ENV_LOADED" = false ]; then
+  log "⚠️ No .env file found in current dir, parent dir, or home dir"
+fi
+
+API_KEY="${OPENAI_API_KEY}"
+MODEL="${OPENAI_MODEL:-gpt-4}"
+DEFAULT_DIR="${GIT_DEFAULT_DIR:-$HOME/dev}"
+MAX_LENGTH="${OPENAI_MAX_TOKENS:-24000}"
+
+if [ -z "$API_KEY" ]; then
+  log "❌ OPENAI_API_KEY not found!"
   exit 1
 fi
 
-echo "🧠 Using model: $MODEL"
+if ! command -v jq &> /dev/null; then
+  log "❌ jq is required but not installed."
+  exit 1
+fi
 
-# Ask user which Git directory to use
-DEFAULT_DIR="$HOME/dev"
-echo "📁 Default search root: $DEFAULT_DIR"
+log "🔑 API Key loaded (${#API_KEY} characters)"
+log "🧠 Using model: $MODEL"
+log "📁 Default search root: $DEFAULT_DIR"
 
+# Ask which Git repo to use
 while true; do
-  read -r -p "📂 Which Git directory do you want to use? (relative to $DEFAULT_DIR): " INPUT_DIR
+  read -r -p "📂 Git directory to use? (relative to $DEFAULT_DIR): " INPUT_DIR
   TARGET_DIR="$DEFAULT_DIR/$INPUT_DIR"
 
   if [ ! -d "$TARGET_DIR" ]; then
-    echo "❌ Directory does not exist: $TARGET_DIR"
+    log "❌ Directory does not exist: $TARGET_DIR"
     continue
   fi
 
   if git -C "$TARGET_DIR" rev-parse --git-dir > /dev/null 2>&1; then
-    echo "✅ Using Git repo at: $TARGET_DIR"
-    cd "$TARGET_DIR" || { echo "❌ Failed to enter $TARGET_DIR"; exit 1; }
+    log "✅ Found Git repo at: $TARGET_DIR"
+    cd "$TARGET_DIR" || { log "❌ Failed to enter $TARGET_DIR"; exit 1; }
     break
   else
-    echo "⚠️ '$TARGET_DIR' is not a Git repository."
+    log "⚠️ Not a Git repository: $TARGET_DIR"
   fi
 done
 
-# Generate full diff (new + tracked changes)
-echo "📥 Collecting working tree changes..."
-git add -N .  # Include untracked files
+log "📥 Collecting working tree changes..."
+git add -N .
 DIFF_CONTENT=$(git diff HEAD)
 
-# Truncate if too long
-MAX_LENGTH=24000  # ~6,000 tokens
 if (( ${#DIFF_CONTENT} > MAX_LENGTH )); then
-  echo "⚠️ Diff is too large (${#DIFF_CONTENT} chars). Truncating to ${MAX_LENGTH}..."
+  log "⚠️ Diff is too large (${#DIFF_CONTENT} chars). Truncating to ${MAX_LENGTH}..."
   DIFF_CONTENT="${DIFF_CONTENT:0:$MAX_LENGTH}"
 fi
 
-echo "📏 Final diff size: ${#DIFF_CONTENT} characters"
+log "📏 Final diff size: ${#DIFF_CONTENT} characters"
 
-# Check for empty diff
 if [ -z "$DIFF_CONTENT" ]; then
-  echo "✅ No changes detected. Nothing to describe."
+  log "✅ No changes detected. Nothing to describe."
   exit 0
 fi
 
-# Prepare JSON payload
+# Short prompt version: keep title + one short paragraph
 REQUEST_JSON=$(jq -n \
   --arg model "$MODEL" \
-  --arg system "You are a commit message generator. Your job is to write concise, clear, one-line git commit messages." \
-  --arg prompt "Generate a one-line git commit message describing the following diff:\n\n$DIFF_CONTENT" \
+  --arg system "You are a playful Git commit assistant. Generate:
+1. A short, whimsical title (blog-post style).
+2. A brief paragraph (2–4 sentences) summarizing what changed and why, in a casual tone.
+Format:
+Title: <title>
+Messages: <brief paragraph>" \
+  --arg prompt "Here is the git diff:\n\n$DIFF_CONTENT" \
   '{
     model: $model,
     messages: [
@@ -67,50 +99,69 @@ REQUEST_JSON=$(jq -n \
     ]
   }')
 
-# Call OpenAI API
+log "🤖 Sending request to OpenAI..."
+T0=$(date +%s)
+
 RESPONSE=$(curl -s https://api.openai.com/v1/chat/completions \
-  -H "Authorization: Bearer ${API_KEY:-$OPENAI_API_KEY}" \
+  -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d "$REQUEST_JSON")
 
-# 🔍 Show full response from OpenAI
-echo -e "\n🧪 Raw OpenAI response:"
-echo "$RESPONSE" | jq || echo "$RESPONSE"
+T1=$(date +%s)
+DURATION=$((T1 - T0))
+log "⏱️ OpenAI response received in ${DURATION}s"
 
-COMMIT_MSG=$(echo "$RESPONSE" | jq -r '.choices[0].message.content' 2>/dev/null)
+if [ "${DEBUG_OPENAI:-false}" = "true" ]; then
+  echo -e "\n🧪 Raw OpenAI response:"
+  echo "$RESPONSE" | jq || echo "$RESPONSE"
+fi
 
-if [[ -z "$COMMIT_MSG" || "$COMMIT_MSG" == "null" ]]; then
-  echo "❌ OpenAI failed to generate a commit message."
-  echo "💡 Try checking the following:"
-  echo "   • Is OPENAI_API_KEY set? → echo \$OPENAI_API_KEY"
-  echo "   • Is the diff too large? → echo \${#DIFF_CONTENT}"
-  echo "   • Is the model available? (gpt-4 may be rate-limited)"
+RAW_OUTPUT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // ""')
+
+# Extract title
+TITLE=$(echo "$RAW_OUTPUT" | awk '/^Title:/ {sub(/^Title:[[:space:]]*/, "", $0); gsub(/^"/, "", $0); gsub(/"$/, "", $0); print; exit}')
+
+# Extract everything after "Messages:" (including if it's on the same line)
+BODY=$(echo "$RAW_OUTPUT" | awk '
+  /^Messages:/ {
+    # Inline message
+    sub(/^Messages:[[:space:]]*/, "", $0);
+    found = 1;
+    if (length($0) > 0) print $0;
+    next
+  }
+  found { print }
+')
+
+# Trim title and body
+TITLE=$(echo "$TITLE" | xargs)
+BODY=$(echo "$BODY" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed 's/^/    /')
+
+if [[ -z "$TITLE" || -z "$BODY" ]]; then
+  log "❌ Failed to parse OpenAI output"
+  echo -e "\n🔍 Raw output:\n$RAW_OUTPUT"
   exit 1
 fi
 
-# Extract commit message
-COMMIT_MSG=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "❌ Failed to get a commit message."')
-CLEAN_MSG=$(echo "$COMMIT_MSG" | sed 's/^"\(.*\)"$/\1/')
+# Show preview
+echo -e "\n💬 Commit Preview:\n"
+echo -e "🔖 $TITLE\n"
+echo -e "📜 Messages:\n$BODY\n"
 
-echo -e "\n💬 Commit message:"
-echo "$CLEAN_MSG"
-
-# Ask to commit
-read -r -p "🟢 Do you want me to commit these changes with this message? (y/N) " CONFIRM
+read -r -p "🟢 Commit with this message? (y/N) " CONFIRM
 if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
   git add .
-  git commit -m "$CLEAN_MSG"
+  git commit -m "$TITLE" -m "$BODY"
   BRANCH=$(git rev-parse --abbrev-ref HEAD)
-  echo "✅ Committed to $BRANCH"
+  log "✅ Committed to $BRANCH"
 
-  # Ask to push
-  read -r -p "📤 Do you want me to push the changes to '$BRANCH'? (y/N) " PUSH_CONFIRM
+  read -r -p "📤 Push to '$BRANCH'? (y/N) " PUSH_CONFIRM
   if [[ "$PUSH_CONFIRM" =~ ^[Yy]$ ]]; then
     git push origin "$BRANCH"
-    echo "✅ Changes pushed to origin/$BRANCH"
+    log "✅ Changes pushed to origin/$BRANCH"
   else
-    echo "❌ Skipping push."
+    log "🚫 Push skipped."
   fi
 else
-  echo "❌ Skipping commit."
+  log "🚫 Commit skipped."
 fi
