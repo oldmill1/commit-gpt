@@ -32,6 +32,10 @@ MODEL="${OPENAI_MODEL:-gpt-4}"
 DEFAULT_DIR="${GIT_DEFAULT_DIR:-$HOME/dev}"
 MAX_LENGTH="${OPENAI_MAX_TOKENS:-24000}"
 
+# Log last 3 letters of API key for security
+log "🔑 API Key loaded (${#API_KEY} characters): ${API_KEY: -3}"
+
+
 if [ -z "$API_KEY" ]; then
   log "❌ OPENAI_API_KEY not found!"
   exit 1
@@ -69,12 +73,14 @@ log "📥 Collecting working tree changes..."
 git add -N .
 DIFF_CONTENT=$(git diff HEAD)
 
-if (( ${#DIFF_CONTENT} > MAX_LENGTH )); then
-  log "⚠️ Diff is too large (${#DIFF_CONTENT} chars). Truncating to ${MAX_LENGTH}..."
-  DIFF_CONTENT="${DIFF_CONTENT:0:$MAX_LENGTH}"
-fi
+SAFE_CHAR_LENGTH=9000
 
-log "📏 Final diff size: ${#DIFF_CONTENT} characters"
+if (( ${#DIFF_CONTENT} > SAFE_CHAR_LENGTH )); then
+  log "⚠️ Diff is too large (${#DIFF_CONTENT} chars). Truncating to ${SAFE_CHAR_LENGTH}..."
+  DIFF_CONTENT="${DIFF_CONTENT:0:$SAFE_CHAR_LENGTH}"
+else
+  log "📏 Diff size is within safe range: ${#DIFF_CONTENT} characters"
+fi
 
 if [ -z "$DIFF_CONTENT" ]; then
   log "✅ No changes detected. Nothing to describe."
@@ -111,10 +117,8 @@ T1=$(date +%s)
 DURATION=$((T1 - T0))
 log "⏱️ OpenAI response received in ${DURATION}s"
 
-if [ "${DEBUG_OPENAI:-false}" = "true" ]; then
-  echo -e "\n🧪 Raw OpenAI response:"
-  echo "$RESPONSE" | jq || echo "$RESPONSE"
-fi
+echo -e "\n🧪 Raw OpenAI response:"
+echo "$RESPONSE" | jq || echo "$RESPONSE"
 
 RAW_OUTPUT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // ""')
 
