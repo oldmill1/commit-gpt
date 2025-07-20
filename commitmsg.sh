@@ -48,26 +48,17 @@ fi
 
 log "🔑 API Key loaded (${#API_KEY} characters)"
 log "🧠 Using model: $MODEL"
-log "📁 Default search root: $DEFAULT_DIR"
+log "📂 Working in Git repo: $TARGET_DIR"
 
 # Ask which Git repo to use
-while true; do
-  read -r -p "📂 Git directory to use? (relative to $DEFAULT_DIR): " INPUT_DIR
-  TARGET_DIR="$DEFAULT_DIR/$INPUT_DIR"
+TARGET_DIR="$(pwd)"
 
-  if [ ! -d "$TARGET_DIR" ]; then
-    log "❌ Directory does not exist: $TARGET_DIR"
-    continue
-  fi
-
-  if git -C "$TARGET_DIR" rev-parse --git-dir > /dev/null 2>&1; then
-    log "✅ Found Git repo at: $TARGET_DIR"
-    cd "$TARGET_DIR" || { log "❌ Failed to enter $TARGET_DIR"; exit 1; }
-    break
-  else
-    log "⚠️ Not a Git repository: $TARGET_DIR"
-  fi
-done
+if git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+  log "✅ Found Git repo at: $TARGET_DIR"
+else
+  log "❌ Not inside a Git repository: $TARGET_DIR"
+  exit 1
+fi
 
 log "📥 Collecting working tree changes..."
 git add -N .
@@ -90,12 +81,12 @@ fi
 # Short prompt version: keep title + one short paragraph
 REQUEST_JSON=$(jq -n \
   --arg model "$MODEL" \
-  --arg system "You are a playful Git commit assistant. Generate:
-1. A short, whimsical title (blog-post style).
-2. A brief paragraph (2–4 sentences) summarizing what changed and why, in a casual tone.
+  --arg system "You are a concise Git commit assistant. Generate:
+1. A short, plain and direct title—human‑readable and not overly technical—that tells a brief story.
+2. A summary of the changes in one or two sentences: use one sentence for a small diff with a single major change, two sentences if it’s larger or has multiple changes; focus on the big change and weight minor ones appropriately.
 Format:
 Title: <title>
-Messages: <brief paragraph>" \
+Messages: <summary>" \
   --arg prompt "Here is the git diff:\n\n$DIFF_CONTENT" \
   '{
     model: $model,
@@ -104,6 +95,7 @@ Messages: <brief paragraph>" \
       { role: "user", content: $prompt }
     ]
   }')
+
 
 log "🤖 Sending request to OpenAI..."
 T0=$(date +%s)
