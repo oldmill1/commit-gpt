@@ -82,8 +82,11 @@ fi
 REQUEST_JSON=$(jq -n \
   --arg model "$MODEL" \
   --arg system "You are a concise Git commit assistant. Generate:
-1. A short, plain and direct title—human‑readable and not overly technical—that tells a brief story.
-2. A summary of the changes in one or two sentences: use one sentence for a small diff with a single major change, two sentences if it’s larger or has multiple changes; focus on the big change and weight minor ones appropriately.
+1. A concise, engaging title that summarizes the commit in a vivid, story-like way—think punchy magazine headline rather than dry technical description.
+Example titles:
+Fix login bug → The Case of the Disappearing Login Button
+Update docs → Docs Get a Much-Needed Spring Cleaning
+2. Give me the TL;DR of this commit—like you’re explaining it to a teammate over coffee. One crisp sentence for small tweaks, two if there’s more to unpack. Skip the tiny stuff unless it’s actually interesting!
 Format:
 Title: <title>
 Messages: <summary>" \
